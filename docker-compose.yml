@@ -1,0 +1,150 @@
+name: hrm-monitoring
+
+services:
+  app:
+    build: ./app
+    container_name: hrm-app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-hrm_user}:${POSTGRES_PASSWORD:-change_this_db_password}@db:5432/${POSTGRES_DB:-hrm_db}
+      SESSION_SECRET: ${SESSION_SECRET:-change_this_session_secret_before_deploy}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [frontend, backend]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    pids_limit: 150
+
+  nginx:
+    image: nginx:1.28-alpine
+    container_name: hrm-nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - nginx_logs:/var/log/nginx
+    depends_on: [app]
+    networks: [frontend, monitoring]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, NET_BIND_SERVICE, SETGID, SETUID]
+    pids_limit: 100
+
+  db:
+    image: postgres:16-alpine
+    container_name: hrm-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hrm_db}
+      POSTGRES_USER: ${POSTGRES_USER:-hrm_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_this_db_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    pids_limit: 150
+
+  pgadmin:
+    image: dpage/pgadmin4:9.8
+    container_name: hrm-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-change_this_pgadmin_password}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+    ports: ["127.0.0.1:${PGADMIN_PORT:-5050}:80"]
+    depends_on: [db]
+    networks: [backend, frontend]
+    security_opt: [no-new-privileges:true]
+    profiles: [admin]
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    container_name: hrm-prometheus
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--web.enable-lifecycle"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports: ["127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"]
+    networks: [monitoring, backend]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    profiles: [monitoring]
+
+  grafana:
+    image: grafana/grafana:12.2.1
+    container_name: hrm-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-change_this_grafana_password}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3001}
+    ports: ["127.0.0.1:${GRAFANA_PORT:-3001}:3000"]
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus, loki]
+    networks: [monitoring]
+    security_opt: [no-new-privileges:true]
+    profiles: [monitoring]
+
+  loki:
+    image: grafana/loki:3.5.7
+    container_name: hrm-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yml"]
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+    networks: [monitoring]
+    security_opt: [no-new-privileges:true]
+    profiles: [monitoring]
+
+  promtail:
+    image: grafana/promtail:3.5.7
+    container_name: hrm-promtail
+    restart: unless-stopped
+    command: ["-config.file=/etc/promtail/config.yml"]
+    volumes:
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+      - nginx_logs:/var/log/nginx:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+    networks: [monitoring]
+    security_opt: [no-new-privileges:true]
+    profiles: [monitoring]
+
+networks:
+  frontend:
+  backend:
+    internal: true
+  monitoring:
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  nginx_logs:
